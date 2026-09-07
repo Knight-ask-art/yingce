@@ -3,6 +3,7 @@ package repository
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -230,8 +231,8 @@ func (r *Repository) PopulateChannelModelPriceTier(item *model.ChannelModel) err
 	return r.attachChannelModelPriceTiers([]*model.ChannelModel{item})
 }
 
-func (r *Repository) DeleteChannelModel(channelID string, id string, modelsJSON string, now time.Time) error {
-	deleted, err := r.DeleteChannelModels(channelID, []string{id}, modelsJSON, now)
+func (r *Repository) DeleteChannelModel(channelID string, id string, now time.Time) error {
+	deleted, err := r.DeleteChannelModels(channelID, []string{id}, now)
 	if err != nil {
 		return err
 	}
@@ -244,13 +245,16 @@ func (r *Repository) DeleteChannelModel(channelID string, id string, modelsJSON 
 // DeleteChannelModels atomically removes a selection and refreshes the channel's
 // compatibility model list. Any active route or task reference aborts the whole
 // transaction so a bulk action cannot leave the administrator with a partial result.
-func (r *Repository) DeleteChannelModels(channelID string, ids []string, modelsJSON string, now time.Time) (int64, error) {
+func (r *Repository) DeleteChannelModels(channelID string, ids []string, now time.Time) (int64, error) {
 	ids = uniqueStrings(ids)
 	if len(ids) == 0 {
 		return 0, gorm.ErrRecordNotFound
 	}
 	var deleted int64
 	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := r.lockSystemChannelForModelMutation(tx, channelID); err != nil {
+			return err
+		}
 		var existing int64
 		if err := tx.Model(&model.ChannelModel{}).
 			Where("channel_id = ? AND id IN ?", channelID, ids).
@@ -290,19 +294,52 @@ func (r *Repository) DeleteChannelModels(channelID string, ids []string, modelsJ
 		if err := tx.Where("id IN ? AND channel_id = ?", ids, channelID).Delete(&model.ChannelModel{}).Error; err != nil {
 			return err
 		}
-		channelResult := tx.Model(&model.ModelChannel{}).
-			Where("id = ? AND scope = ?", channelID, model.ChannelScopeSystem).
-			Updates(map[string]any{"models_json": modelsJSON, "updated_at": now})
-		if channelResult.Error != nil {
-			return channelResult.Error
-		}
-		if channelResult.RowsAffected != 1 {
-			return gorm.ErrRecordNotFound
+		if err := refreshChannelModelNames(tx, channelID, now); err != nil {
+			return err
 		}
 		deleted = result.RowsAffected
 		return nil
 	})
 	return deleted, err
+}
+
+// SyncChannelModelNames serializes compatibility-list refreshes for a system
+// channel and derives the list from the committed channel_models rows. Callers
+// must not pass a previously-read snapshot because concurrent administrator
+// writes could otherwise overwrite a newer catalog.
+func (r *Repository) SyncChannelModelNames(channelID string, now time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := r.lockSystemChannelForModelMutation(tx, channelID); err != nil {
+			return err
+		}
+		return refreshChannelModelNames(tx, channelID, now)
+	})
+}
+
+func (r *Repository) lockSystemChannelForModelMutation(tx *gorm.DB, channelID string) error {
+	query := tx.Select("id").Where("id = ? AND scope = ?", channelID, model.ChannelScopeSystem)
+	if r.Dialect() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var channel model.ModelChannel
+	return query.First(&channel).Error
+}
+
+func refreshChannelModelNames(tx *gorm.DB, channelID string, now time.Time) error {
+	var names []string
+	if err := tx.Model(&model.ChannelModel{}).
+		Where("channel_id = ? AND enabled = ?", channelID, true).
+		Order("created_at asc").
+		Pluck("model_key", &names).Error; err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(names)
+	if err != nil {
+		return err
+	}
+	return tx.Model(&model.ModelChannel{}).
+		Where("id = ? AND scope = ?", channelID, model.ChannelScopeSystem).
+		Updates(map[string]any{"models_json": string(encoded), "updated_at": now}).Error
 }
 
 func (r *Repository) CreateMissingChannelModels(items []model.ChannelModel) (int64, error) {

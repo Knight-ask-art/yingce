@@ -866,18 +866,8 @@ func (s *Service) DeleteAdminChannelModels(actor *model.User, channelID string, 
 	if found != len(modelIDs) {
 		return 0, BadAuthRequest("所选渠道模型中存在已删除或不属于当前渠道的记录，请刷新后重试")
 	}
-	names := make([]string, 0, len(items))
-	for _, item := range items {
-		if item.Enabled && !selected[item.ID] {
-			names = append(names, item.ModelKey)
-		}
-	}
-	encoded, err := json.Marshal(names)
-	if err != nil {
-		return 0, err
-	}
 	// 删除模型与渠道的兼容模型清单必须同事务提交，避免接口报错但列表已部分变化。
-	deleted, err := s.repo.DeleteChannelModels(channelID, modelIDs, string(encoded), time.Now())
+	deleted, err := s.repo.DeleteChannelModels(channelID, modelIDs, time.Now())
 	if errors.Is(err, repository.ErrChannelModelInUse) {
 		return 0, BadAuthRequest("所选渠道模型中有模型仍被前台模型供应线路或进行中任务使用，本次未删除任何模型")
 	}
@@ -986,20 +976,7 @@ func (s *Service) ensureChannelModels(channelID string, includeDisabled bool) ([
 }
 
 func (s *Service) syncChannelModelNames(channel *model.ModelChannel) error {
-	items, err := s.repo.ChannelModels(channel.ID, false)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(items))
-	for _, item := range items {
-		names = append(names, item.ModelKey)
-	}
-	encoded, err := json.Marshal(names)
-	if err != nil {
-		return err
-	}
-	channel.ModelsJSON = string(encoded)
-	return s.repo.Save(channel)
+	return s.repo.SyncChannelModelNames(channel.ID, time.Now())
 }
 
 func (s *Service) capabilityForProtocol(protocol model.ChannelInterfaceType) string {

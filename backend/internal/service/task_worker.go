@@ -12,6 +12,8 @@ import (
 	"infinite-canvas/backend/internal/model"
 )
 
+const newAPIChannel2TaskSyncMaxAge = 5 * time.Minute
+
 // taskWorkerCoordinator 收敛任务领取、租约维护和执行结果落库，避免 Service 同时承担 worker 生命周期与业务命令。
 type taskWorkerCoordinator struct {
 	service *Service
@@ -226,6 +228,9 @@ func (w *taskWorkerCoordinator) processClaimedTask(task *model.Task, globalSlot 
 			_ = s.log(task.UserID, task.ID, "info", message, task.PollStage)
 			return nil
 		}
+		if newAPIChannel2TaskSyncExpired(*task, err, time.Now()) {
+			err = errors.New("上游任务长时间未同步，已停止自动查询，请确认渠道任务状态后重试。")
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = errors.New(taskTimeoutMessage(task.Type))
 		}
@@ -297,7 +302,7 @@ func (s *Service) shouldDeferVideoProviderTask(task model.Task, decryptedInput s
 	deferSignal := errors.Is(err, context.DeadlineExceeded)
 	var pendingErr providerStatePendingError
 	if errors.As(err, &pendingErr) {
-		deferSignal = strings.TrimSpace(pendingErr.TaskID) == providerRequestID
+		deferSignal = strings.TrimSpace(pendingErr.TaskID) == providerRequestID && !newAPIChannel2TaskSyncExpired(task, err, time.Now())
 	}
 	if !deferSignal {
 		return false
@@ -308,6 +313,17 @@ func (s *Service) shouldDeferVideoProviderTask(task model.Task, decryptedInput s
 	}
 	resolved, resolveErr := s.resolveProviderConfig(input.Config)
 	return resolveErr == nil && resolved.InterfaceType == string(model.ChannelInterfaceNewAPIChannel2)
+}
+
+func newAPIChannel2TaskSyncExpired(task model.Task, err error, now time.Time) bool {
+	var pendingErr providerStatePendingError
+	if !errors.As(err, &pendingErr) || strings.TrimSpace(pendingErr.TaskID) == "" || strings.TrimSpace(pendingErr.TaskID) != strings.TrimSpace(task.ProviderRequestID) {
+		return false
+	}
+	if task.StartedAt == nil {
+		return true
+	}
+	return !now.Before(task.StartedAt.Add(newAPIChannel2TaskSyncMaxAge))
 }
 
 func taskTimeoutMessage(taskType string) string {
