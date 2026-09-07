@@ -13015,6 +13015,18 @@ html:not(.dark) .creation-history-drawer-root {
     backdrop-filter: none !important;
 }
 
+/* Tooltip 必须使用同一套浮层背景/前景语义色。Ant Design 会让它继承
+   colorTextLightSolid（实心按钮文字色），深色主题下会形成深底深字。 */
+:where(.ant-tooltip) {
+    --ant-tooltip-arrow-background-color: var(--popover) !important;
+    --ant-tooltip-overlay-color: var(--popover-foreground) !important;
+}
+
+:where(.ant-tooltip-container, .ant-tooltip-inner) {
+    background: var(--popover) !important;
+    color: var(--popover-foreground) !important;
+}
+
 :where(.ant-select-item-option, .ant-dropdown-menu-item, .ant-dropdown-menu-submenu-title, .ant-cascader-menu-item, .ant-mentions-dropdown-menu-item) {
     min-height: 36px;
     margin-block: 2px;
